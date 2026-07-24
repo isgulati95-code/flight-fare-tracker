@@ -1,0 +1,12 @@
+# NEVER commit the API key
+serpapi_key.txt
+.serpapi_key
+
+# Local noise
+__pycache__/
+*.pyc
+capture.log
+.DS_Store
+
+# Local-only scheduler (cloud uses GitHub Actions instead)
+com.mmt.faretracker.plist

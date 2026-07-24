@@ -1,0 +1,50 @@
+name: Daily fare capture
+
+on:
+  schedule:
+    # 10:00 IST  ==  04:30 UTC.  GitHub cron is always UTC.
+    - cron: "30 4 * * *"
+  workflow_dispatch: {}   # lets you run it manually from the Actions tab
+
+# Allow the job to commit the updated database + dashboard back to the repo.
+permissions:
+  contents: write
+
+concurrency:
+  group: fare-capture
+  cancel-in-progress: false
+
+jobs:
+  capture:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Capture fares and rebuild dashboard
+        env:
+          SERPAPI_KEY: ${{ secrets.SERPAPI_KEY }}
+        run: python capture.py
+
+      - name: Publish dashboard as index.html (for GitHub Pages)
+        run: cp dashboard.html index.html
+
+      - name: Commit updated data
+        run: |
+          git config user.name  "fare-tracker-bot"
+          git config user.email "actions@github.com"
+          git add prices.db dashboard.html index.html
+          if git diff --cached --quiet; then
+            echo "No changes to commit."
+          else
+            git commit -m "Daily capture $(date -u +%Y-%m-%d)"
+            git push
+          fi
