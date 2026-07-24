@@ -51,21 +51,24 @@ def build_fares_excel(path=FARES_XLSX):
         ws.append([r[c] for c in cols])
     _autosize(ws)
 
-    # Sheet 2: curated slot view (what the dashboard tables show)
+    # Sheet 2: curated view (exactly what the dashboard tables show)
     from render_dashboard import load
-    series, _dates, _tb, _meta = load()
-    ws2 = wb.create_sheet("Slot view")
-    scols = ["capture_date", "sector", "airline", "slot", "horizon",
+    entries_by_sector, _dates, _tb, _meta = load()
+    ws2 = wb.create_sheet("Tracked flights")
+    scols = ["capture_date", "sector", "airline", "row", "horizon",
              "target_date", "dep_time", "flight_number", "price"]
     _header(ws2, scols)
     name_by = {s["sector"]: s["name"] for s in config.SECTORS}
-    slot_order = {lbl: i for i, (lbl, _) in enumerate(config.TIME_SLOTS)}
     flat = []
-    for (sector, airline, slot, horizon), pts in series.items():
-        for p in pts:
-            flat.append([p["date"], name_by.get(sector, sector), airline, slot, horizon,
-                         p["target_date"], p["dep_time"], p["flight_number"], p["price"]])
-    flat.sort(key=lambda r: (r[0], r[1], r[2], slot_order.get(r[3], 9), r[4]))
+    for sector, groups in entries_by_sector.items():
+        for airline, entries in groups:
+            for e in entries:
+                for horizon, pts in e["byh"].items():
+                    for p in pts:
+                        flat.append([p["date"], name_by.get(sector, sector), airline,
+                                     e["label"], horizon, p["target_date"],
+                                     p["dep_time"], p["flight_number"], p["price"]])
+    flat.sort(key=lambda r: (r[0], r[1], r[2], str(r[6]), r[4]))
     for row in flat:
         ws2.append(row)
     _autosize(ws2)

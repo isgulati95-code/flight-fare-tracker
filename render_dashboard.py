@@ -31,72 +31,106 @@ def minutes(hhmm):
 
 
 def load():
-    """Return (series, capture_dates, target_by, meta).
+    """Return (entries_by_sector, capture_dates, target_by, meta).
 
-    series[(sector, airline, slot_label, horizon)] = list of
-        {date, price, dep_time, flight_number, target_date}  (sorted by date)
+    entries_by_sector[sector] = list of (airline, [entry, ...]) groups, where
+        entry = {"label", "sub", "dep", "order", "byh": {horizon: [pts]}}
+    "slots" sectors -> one entry per popular time-slot per tracked airline
+    "all"   sectors -> one entry per distinct nonstop flight, every airline
     """
-    all_airlines = sorted({a for s in config.SECTORS for a in s.get("airlines", config.AIRLINES)})
     conn = sqlite3.connect(config.DB_PATH)
     conn.row_factory = sqlite3.Row
-    placeholders = ",".join("?" * len(all_airlines))
     rows = conn.execute(
-        f"""
-        SELECT capture_date, sector, horizon, target_date, airline,
-               dep_time, flight_number, price
-        FROM prices
-        WHERE price IS NOT NULL AND airline IN ({placeholders})
-        """,
-        all_airlines,
+        """SELECT capture_date, sector, horizon, target_date, airline,
+                  dep_time, flight_number, price
+           FROM prices"""
     ).fetchall()
     meta = conn.execute(
         "SELECT COUNT(*) AS n, MIN(capture_date) AS first, MAX(capture_date) AS last FROM prices"
     ).fetchone()
     conn.close()
 
-    # Group candidate flights per (capture_date, sector, horizon, airline).
-    buckets = {}
-    target_by = {}  # (capture_date, horizon) -> target_date
+    sec_cfg = {s["sector"]: s for s in config.SECTORS}
+    buckets = {}  # (capture_date, sector, horizon, airline) -> [flights]
+    target_by = {}
     capture_dates = set()
     for r in rows:
+        if r["sector"] not in sec_cfg:
+            continue
         capture_dates.add(r["capture_date"])
         target_by[(r["capture_date"], r["horizon"])] = r["target_date"]
-        key = (r["capture_date"], r["sector"], r["horizon"], r["airline"])
-        buckets.setdefault(key, []).append(
+        buckets.setdefault((r["capture_date"], r["sector"], r["horizon"], r["airline"]), []).append(
             {"dep": r["dep_time"], "price": r["price"], "fno": r["flight_number"]}
         )
 
-    # For each bucket pick the flight nearest each time-slot anchor.
-    series = {}
-    for (cdate, sector, horizon, airline), flights in buckets.items():
-        for slot_label, anchor in config.TIME_SLOTS:
-            amin = minutes(anchor)
-            best, best_d = None, None
-            for f in flights:
-                fm = minutes(f["dep"])
-                if fm is None:
-                    continue
-                d = abs(fm - amin)
-                if d <= config.SLOT_WINDOW_MIN and (best_d is None or d < best_d or
-                                                    (d == best_d and f["price"] < best["price"])):
-                    best, best_d = f, d
-            if best is None:
+    # series[(sector, airline, rowkey, horizon)] = [pts]; rowmeta[(sector,airline,rowkey)] = {...}
+    series, rowmeta = {}, {}
+
+    def add(sector, airline, rk, horizon, cd, price, dep, fno, meta_row):
+        series.setdefault((sector, airline, rk, horizon), []).append(
+            {"date": cd, "price": price, "dep_time": dep, "flight_number": fno,
+             "target_date": target_by[(cd, horizon)]})
+        rowmeta[(sector, airline, rk)] = meta_row
+
+    for (cd, sector, horizon, airline), flights in buckets.items():
+        cfg = sec_cfg[sector]
+        if cfg.get("mode", "slots") == "all":
+            for f in flights:  # every flight, every airline
+                rk = ("flight", f["fno"] or f["dep"])
+                add(sector, airline, rk, horizon, cd, f["price"], f["dep"], f["fno"],
+                    {"label": f["fno"] or f["dep"], "sub": "",
+                     "order": minutes(f["dep"]) if minutes(f["dep"]) is not None else 9999,
+                     "dep": f["dep"]})
+        else:  # slots: nearest fared flight to each anchor, tracked airlines only
+            if airline not in cfg.get("airlines", config.AIRLINES):
                 continue
-            skey = (sector, airline, slot_label, horizon)
-            series.setdefault(skey, []).append(
-                {
-                    "date": cdate,
-                    "price": best["price"],
-                    "dep_time": best["dep"],
-                    "flight_number": best["fno"],
-                    "target_date": target_by[(cdate, horizon)],
-                }
-            )
+            for i, (slot_label, anchor) in enumerate(config.TIME_SLOTS):
+                amin = minutes(anchor)
+                best, best_d = None, None
+                for f in flights:
+                    if f["price"] is None:
+                        continue
+                    fm = minutes(f["dep"])
+                    if fm is None:
+                        continue
+                    d = abs(fm - amin)
+                    if d <= config.SLOT_WINDOW_MIN and (best_d is None or d < best_d or
+                                                        (d == best_d and f["price"] < best["price"])):
+                        best, best_d = f, d
+                if best is None:
+                    continue
+                add(sector, airline, ("slot", slot_label), horizon, cd, best["price"],
+                    best["dep"], best["fno"],
+                    {"label": slot_label, "sub": f"~{anchor}", "order": i, "dep": best["dep"]})
 
     for k in series:
         series[k].sort(key=lambda p: p["date"])
 
-    return series, sorted(capture_dates), target_by, meta
+    capture_dates = sorted(capture_dates)
+    latest = capture_dates[-1] if capture_dates else None
+    horizons = [h for h, _ in config.HORIZONS]
+
+    # Assemble ordered entries per sector (rows present at the latest capture).
+    entries_by_sector = {}
+    for sector, cfg in sec_cfg.items():
+        by_airline = {}
+        for (s, a, rk), m in rowmeta.items():
+            if s != sector:
+                continue
+            byh = {h: series.get((sector, a, rk, h), []) for h in horizons}
+            if latest is not None and not any(any(p["date"] == latest for p in pts) for pts in byh.values()):
+                continue
+            by_airline.setdefault(a, []).append(
+                {"label": m["label"], "sub": m["sub"], "dep": m["dep"], "order": m["order"], "byh": byh})
+        if cfg.get("mode", "slots") == "all":
+            airline_order = sorted(by_airline, key=lambda a: min(e["order"] for e in by_airline[a]))
+        else:
+            airline_order = [a for a in cfg.get("airlines", config.AIRLINES) if a in by_airline]
+        entries_by_sector[sector] = [
+            (a, sorted(by_airline[a], key=lambda e: e["order"])) for a in airline_order
+        ]
+
+    return entries_by_sector, capture_dates, target_by, meta
 
 
 def inr(n):
@@ -104,7 +138,8 @@ def inr(n):
 
 
 def delta_cell(pts):
-    """Latest price + day-over-day change for one series list."""
+    """Latest price + day-over-day change for one series list (nulls ignored)."""
+    pts = [p for p in pts if p.get("price") is not None]
     if not pts:
         return "<td class='muted'>—</td>"
     last = pts[-1]
@@ -121,37 +156,32 @@ def delta_cell(pts):
     return f"<td title='{title}'>{inr(last['price'])}{chg}</td>"
 
 
-def sector_table(series, sector, sector_name, airlines, latest, target_by):
+def sector_table(sector_name, first_col, groups, latest, target_by):
     horizons = [h for h, _ in config.HORIZONS]
+    ncols = len(horizons) + 2
     head_cells = "".join(
         f"<th>{h}<br><span class='muted'>{(target_by.get((latest, h)) or '')[5:]}</span></th>"
         for h in horizons
     )
     body = []
-    for airline in airlines:
-        body.append(
-            f"<tr class='air'><td colspan='{len(horizons)+2}'>{escape(airline)}</td></tr>"
-        )
-        for slot_label, anchor in config.TIME_SLOTS:
-            # representative departure time at latest capture (prefer earliest horizon w/ data)
-            rep_dep = ""
-            for h in horizons:
-                s = series.get((sector, airline, slot_label, h), [])
-                if s and s[-1]["date"] == latest:
-                    rep_dep = s[-1]["dep_time"] or ""
-                    break
+    for airline, entries in groups:
+        body.append(f"<tr class='air'><td colspan='{ncols}'>{escape(airline)}</td></tr>")
+        for e in entries:
+            first = escape(str(e["label"]))
+            if e["sub"]:
+                first += f"<br><span class='muted'>{escape(e['sub'])}</span>"
             cells = "".join(
-                delta_cell([p for p in series.get((sector, airline, slot_label, h), [])
-                            if p["date"] <= latest])
+                delta_cell([p for p in e["byh"].get(h, []) if p["date"] <= latest])
                 for h in horizons
             )
             body.append(
-                f"<tr><td class='slot'>{slot_label}<br><span class='muted'>~{anchor}</span></td>"
-                f"<td class='muted'>{rep_dep}</td>{cells}</tr>"
+                f"<tr><td class='slot'>{first}</td><td class='muted'>{escape(e['dep'] or '')}</td>{cells}</tr>"
             )
+    if not body:
+        body.append(f"<tr><td colspan='{ncols}' class='muted'>No flights captured yet</td></tr>")
     return (
         f"<div class='card'><h3>{escape(sector_name)}</h3>"
-        f"<table><thead><tr><th>Slot</th><th>Dep</th>{head_cells}</tr></thead>"
+        f"<table><thead><tr><th>{first_col}</th><th>Dep</th>{head_cells}</tr></thead>"
         f"<tbody>{''.join(body)}</tbody></table></div>"
     )
 
@@ -198,20 +228,24 @@ def svg_chart(series_map):
     return "".join(parts)
 
 
-def charts_section(series):
+def charts_section(entries_by_sector):
     horizons = [h for h, _ in config.HORIZONS]
     blocks = []
     for sec in config.SECTORS:
         cells = []
-        for airline in sec.get("airlines", config.AIRLINES):
-            for slot_label, _ in config.TIME_SLOTS:
-                smap = {h: series.get((sec["sector"], airline, slot_label, h), []) for h in horizons}
+        for airline, entries in entries_by_sector.get(sec["sector"], []):
+            for e in entries:
+                smap = {h: [p for p in e["byh"].get(h, []) if p.get("price") is not None]
+                        for h in horizons}
                 smap = {h: v for h, v in smap.items() if v}
+                if not smap:
+                    continue
                 cells.append(
-                    f"<div class='mini'><div class='mini-t'>{escape(airline)} · {slot_label}</div>"
+                    f"<div class='mini'><div class='mini-t'>{escape(airline)} · {escape(str(e['label']))}</div>"
                     f"{svg_chart(smap)}</div>"
                 )
-        blocks.append(f"<h4>{escape(sec['name'])}</h4><div class='minis'>{''.join(cells)}</div>")
+        if cells:
+            blocks.append(f"<h4>{escape(sec['name'])}</h4><div class='minis'>{''.join(cells)}</div>")
     return (
         "<details class='charts'><summary>Show trend charts (fare vs capture date)</summary>"
         + "".join(blocks) + "</details>"
@@ -310,13 +344,13 @@ def aviation_section():
 
 
 def render():
-    series, capture_dates, target_by, meta = load()
+    entries_by_sector, capture_dates, target_by, meta = load()
     latest = capture_dates[-1] if capture_dates else None
     generated = dt.datetime.now().strftime("%Y-%m-%d %H:%M")
 
-    n_slots = len({(s, a, sl) for (s, a, sl, h) in series})
+    n_tracked = sum(len(entries) for groups in entries_by_sector.values() for _, entries in groups)
     stats = f"""
-      <div class="stat"><b>{n_slots}</b><span>Flight slots tracked</span></div>
+      <div class="stat"><b>{n_tracked}</b><span>Flights tracked</span></div>
       <div class="stat"><b>{meta['n'] or 0:,}</b><span>Rows stored</span></div>
       <div class="stat"><b>{len(capture_dates)}</b><span>Days captured</span></div>
       <div class="stat"><b>{meta['last'] or '—'}</b><span>Latest capture</span></div>"""
@@ -326,11 +360,12 @@ def render():
 
     if latest:
         tables = "".join(
-            sector_table(series, s["sector"], s["name"],
-                         s.get("airlines", config.AIRLINES), latest, target_by)
+            sector_table(s["name"],
+                         "Flight" if s.get("mode", "slots") == "all" else "Slot",
+                         entries_by_sector.get(s["sector"], []), latest, target_by)
             for s in config.SECTORS
         )
-        charts = charts_section(series)
+        charts = charts_section(entries_by_sector)
     else:
         tables = "<div class='empty'>No captures yet. Run <code>python3 capture.py</code>.</div>"
         charts = ""
@@ -388,7 +423,7 @@ def render():
 </style></head>
 <body><div class="wrap">
   <h1>✈️ Flight Fare Tracker</h1>
-  <div class="sub">Delhi–Mumbai · Delhi–Bengaluru · Delhi–Jaipur · Pune–Bengaluru · IndiGo &amp; Air India · 3 time-slots × 2 booking horizons</div>
+  <div class="sub">Metro routes: IndiGo &amp; Air India at 3 popular slots · Non-metro (Delhi–Jaipur, Pune–Bengaluru): every flight, all airlines · booking horizons +1wk &amp; +3wk</div>
   <div class="stats">{stats}</div>
   <div class="downloads">
     <a href="fares.xlsx" download>⬇︎ Download fares (Excel)</a>
@@ -398,7 +433,7 @@ def render():
   {tables}
   {aviation}
   {charts}
-  <footer>Source: SerpAPI / Google Flights. Prices in INR, nearest nonstop flight to each slot. Generated {generated}.</footer>
+  <footer>Source: SerpAPI / Google Flights. Prices in INR. Metro slots show the nearest fared flight; non-metro routes show every nonstop flight. Generated {generated}.</footer>
 </div></body></html>"""
 
     with open(config.DASHBOARD_PATH, "w") as fh:

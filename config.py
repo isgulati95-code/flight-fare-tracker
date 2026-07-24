@@ -10,13 +10,16 @@ number of API calls per run is only  (number of SECTORS) x (number of HORIZONS).
 # Each search returns all airlines and all departure times for that route/date.
 # Optional per-sector "airlines" overrides the global AIRLINES list below
 # (useful where only one carrier flies the route).
+# mode:
+#   "slots" (default) - metro routes: track IndiGo & Air India at 3 popular slots
+#   "all"             - non-metro routes: capture EVERY nonstop flight, ALL airlines
 SECTORS = [
     {"sector": "DEL-BOM", "origin": "DEL", "destination": "BOM", "name": "Delhi → Mumbai"},
     {"sector": "DEL-BLR", "origin": "DEL", "destination": "BLR", "name": "Delhi → Bengaluru"},
     {"sector": "DEL-JAI", "origin": "DEL", "destination": "JAI", "name": "Delhi → Jaipur",
-     "airlines": ["IndiGo"]},
+     "mode": "all"},
     {"sector": "PNQ-BLR", "origin": "PNQ", "destination": "BLR", "name": "Pune → Bengaluru",
-     "airlines": ["IndiGo"]},
+     "mode": "all"},
 ]
 
 # --- Booking horizons: label -> number of days ahead of the capture date -----
