@@ -3,8 +3,8 @@
 Daily flight-fare capture.
 
 For every SECTOR x HORIZON in config.py, this queries SerpAPI's Google Flights
-engine once, stores every nonstop flight returned, and tags the specific flights
-listed in TARGETS. Then it regenerates the dashboard.
+engine once and stores every nonstop flight returned. The dashboard later picks
+the 5 time-slots per airline from this data. Then it regenerates the dashboard.
 
 Usage:
     export SERPAPI_KEY=your_key_here      # or put the key in serpapi_key.txt
