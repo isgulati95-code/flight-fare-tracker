@@ -10,3 +10,6 @@ capture.log
 
 # Local-only scheduler (cloud uses GitHub Actions instead)
 com.mmt.faretracker.plist
+
+# Claude Code local settings
+.claude/
