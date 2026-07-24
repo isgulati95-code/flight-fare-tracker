@@ -3,19 +3,29 @@
 Tracks daily fares for selected sectors/airlines/flights across several booking
 horizons, using **SerpAPI's Google Flights** engine, and renders a dashboard.
 
-## What it captures (trial scope)
+## What it captures
 
-- **Sectors:** Delhi→Mumbai, Delhi→Bengaluru
-- **Airlines:** IndiGo, Air India
-- **Time slots:** 5 across the day — Early ~06:00, Morning ~09:00, Midday ~13:00,
-  Evening ~17:00, Night ~21:00 (nearest nonstop flight to each anchor)
-- **Booking horizons:** D+1, +1 week, +3 weeks
-- One search returns *all* flights for a route+date, so a run costs only
-  **6 API calls/day** (2 sectors × 3 horizons) → ~180/month, within the free 250.
+### A. Flight fares (SerpAPI / Google Flights)
+- **Sectors:** Delhi→Mumbai, Delhi→Bengaluru, Delhi→Jaipur, Pune→Bengaluru
+- **Airlines:** IndiGo & Air India (Delhi–Jaipur and Pune–Bengaluru are IndiGo-only)
+- **Time slots:** 3 popular windows — Early morning ~06:30, Morning ~09:00, Evening ~18:30
+  (nearest nonstop flight to each anchor)
+- **Booking horizons:** +1 week, +3 weeks
+- Cost = sectors × horizons = **8 API calls/day** (~240/month, within the free 250).
 
 Every returned nonstop flight is stored in `prices.db`; the dashboard selects the
-5 slots × 2 airlines × 3 horizons per sector at view time (edit slots in
-`config.py` anytime without re-capturing).
+slots × airlines × horizons at view time (edit `config.py` anytime, no re-capture).
+
+### B. National aviation activity (civilaviation.gov.in)
+Scraped daily from the Ministry of Civil Aviation home-page dashboard (shows the
+previous day): domestic & international **departing flights and passengers**, plus
+per-airline **passenger load factor** and **on-time performance**. Stored in
+`aviation.db` as a growing daily history.
+
+### Downloads
+Two Excel workbooks are regenerated every run and linked on the dashboard:
+- `fares.xlsx` — all raw flight fares + a curated slot view
+- `aviation.xlsx` — daily long history + pivot sheets (load factor, traffic)
 
 ## Setup
 
@@ -33,32 +43,31 @@ Provide your SerpAPI key one of these ways:
 python3 capture.py
 ```
 
-This queries the API, stores rows in `prices.db`, and rebuilds `dashboard.html`.
+One command does everything: SerpAPI fare capture → aviation scrape → rebuild
+`dashboard.html` → refresh `fares.xlsx` and `aviation.xlsx`.
 Open `dashboard.html` in a browser to view it.
 
-## Schedule it daily at 10 AM (macOS)
+## Automating it daily (no laptop needed)
 
-Uses `launchd`. Create `~/Library/LaunchAgents/com.mmt.faretracker.plist`
-(see `SCHEDULING.md`), then:
-
-```bash
-launchctl load ~/Library/LaunchAgents/com.mmt.faretracker.plist
-```
+See `SCHEDULING.md`. Recommended: **GitHub Actions** runs `capture.py` in the
+cloud every day at 10:00 IST and commits the updated data + dashboard back.
 
 ## Files
 
 | File | Purpose |
 |---|---|
 | `config.py` | Sectors, airlines, time slots, horizons — edit to change scope |
-| `capture.py` | Daily capture: calls SerpAPI, stores every nonstop flight in `prices.db` |
-| `render_dashboard.py` | Builds the self-contained `dashboard.html` (tables + charts) |
-| `prices.db` | SQLite store of every captured flight |
+| `capture.py` | Daily run: SerpAPI fares + aviation scrape + dashboard + Excel |
+| `aviation_capture.py` | Scrapes civilaviation.gov.in daily metrics into `aviation.db` |
+| `render_dashboard.py` | Builds the self-contained `dashboard.html` |
+| `export_excel.py` | Builds `fares.xlsx` and `aviation.xlsx` |
+| `prices.db` / `aviation.db` | SQLite stores (fares / aviation), history grows daily |
 | `dashboard.html` | The dashboard (regenerated each run) |
 | `.github/workflows/capture.yml` | Cloud scheduler — runs daily at 10:00 IST |
 
 ## Scaling up later
 
-Edit `config.py` — add sectors to `SECTORS`, flights to `TARGETS`, horizons to
-`HORIZONS`. Cost = `len(SECTORS) × len(HORIZONS)` API calls per day.
+Edit `config.py` — add sectors to `SECTORS`, horizons to `HORIZONS`.
+Cost = `len(SECTORS) × len(HORIZONS)` API calls per day (currently 4 × 2 = 8).
 The full 19-sector wishlist ≈ (19 routes × 6 horizons) ≈ 114 calls/day, which
 needs a paid SerpAPI plan.

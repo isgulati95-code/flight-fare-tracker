@@ -12,6 +12,7 @@ Layout:
 Everything is rendered server-side so it displays in any browser without JS.
 """
 
+import os
 import sqlite3
 import datetime as dt
 from html import escape
@@ -19,6 +20,7 @@ from html import escape
 import config
 
 HCOLORS = {"D+1": "var(--h1)", "+1wk": "var(--h2)", "+3wk": "var(--h3)"}
+AVIATION_DB = "aviation.db"
 
 
 def minutes(hhmm):
@@ -34,9 +36,10 @@ def load():
     series[(sector, airline, slot_label, horizon)] = list of
         {date, price, dep_time, flight_number, target_date}  (sorted by date)
     """
+    all_airlines = sorted({a for s in config.SECTORS for a in s.get("airlines", config.AIRLINES)})
     conn = sqlite3.connect(config.DB_PATH)
     conn.row_factory = sqlite3.Row
-    placeholders = ",".join("?" * len(config.AIRLINES))
+    placeholders = ",".join("?" * len(all_airlines))
     rows = conn.execute(
         f"""
         SELECT capture_date, sector, horizon, target_date, airline,
@@ -44,7 +47,7 @@ def load():
         FROM prices
         WHERE price IS NOT NULL AND airline IN ({placeholders})
         """,
-        config.AIRLINES,
+        all_airlines,
     ).fetchall()
     meta = conn.execute(
         "SELECT COUNT(*) AS n, MIN(capture_date) AS first, MAX(capture_date) AS last FROM prices"
@@ -118,14 +121,14 @@ def delta_cell(pts):
     return f"<td title='{title}'>{inr(last['price'])}{chg}</td>"
 
 
-def sector_table(series, sector, sector_name, latest, target_by):
+def sector_table(series, sector, sector_name, airlines, latest, target_by):
     horizons = [h for h, _ in config.HORIZONS]
     head_cells = "".join(
         f"<th>{h}<br><span class='muted'>{(target_by.get((latest, h)) or '')[5:]}</span></th>"
         for h in horizons
     )
     body = []
-    for airline in config.AIRLINES:
+    for airline in airlines:
         body.append(
             f"<tr class='air'><td colspan='{len(horizons)+2}'>{escape(airline)}</td></tr>"
         )
@@ -200,7 +203,7 @@ def charts_section(series):
     blocks = []
     for sec in config.SECTORS:
         cells = []
-        for airline in config.AIRLINES:
+        for airline in sec.get("airlines", config.AIRLINES):
             for slot_label, _ in config.TIME_SLOTS:
                 smap = {h: series.get((sec["sector"], airline, slot_label, h), []) for h in horizons}
                 smap = {h: v for h, v in smap.items() if v}
@@ -212,6 +215,97 @@ def charts_section(series):
     return (
         "<details class='charts'><summary>Show trend charts (fare vs capture date)</summary>"
         + "".join(blocks) + "</details>"
+    )
+
+
+def _fmt_int(v):
+    try:
+        return f"{int(round(v)):,}"
+    except (TypeError, ValueError):
+        return "—"
+
+
+def aviation_section():
+    """Render the national aviation-activity panel from aviation.db, or ''."""
+    if not os.path.exists(AVIATION_DB):
+        return ""
+    conn = sqlite3.connect(AVIATION_DB)
+    conn.row_factory = sqlite3.Row
+    try:
+        recent = conn.execute(
+            "SELECT report_date, MAX(capture_date) mcd FROM aviation "
+            "GROUP BY report_date ORDER BY mcd DESC LIMIT 2"
+        ).fetchall()
+    except sqlite3.OperationalError:
+        conn.close()
+        return ""
+    if not recent:
+        conn.close()
+        return ""
+    latest = recent[0]["report_date"]
+    prev = recent[1]["report_date"] if len(recent) > 1 else None
+
+    def val(report, section, item):
+        r = conn.execute(
+            "SELECT value_num, value_raw FROM aviation WHERE report_date=? AND section=? AND item=?",
+            (report, section, item),
+        ).fetchone()
+        return (r["value_num"], r["value_raw"]) if r else (None, None)
+
+    def traffic_stat(section, item, label):
+        num, raw = val(latest, section, item)
+        delta = ""
+        if prev:
+            pnum, _ = val(prev, section, item)
+            if num is not None and pnum is not None:
+                d = num - pnum
+                if d:
+                    cls = "chg-up" if d > 0 else "chg-down"
+                    arr = "▲" if d > 0 else "▼"
+                    delta = f" <span class='{cls}'>{arr}{_fmt_int(abs(d))}</span>"
+        return (f"<div class='stat'><b>{raw or '—'}{delta}</b>"
+                f"<span>{label}</span></div>")
+
+    stats = (
+        traffic_stat("Domestic traffic", "Departing flights", "Dom · departing flights") +
+        traffic_stat("Domestic traffic", "Departing Pax", "Dom · departing pax") +
+        traffic_stat("International traffic", "Departing flights", "Int · departing flights") +
+        traffic_stat("International traffic", "Departing Pax", "Int · departing pax")
+    )
+
+    # Per-airline table: Load Factor + On-Time Performance
+    airlines = [r["item"] for r in conn.execute(
+        "SELECT DISTINCT item FROM aviation WHERE section='Passenger Load Factor' AND report_date=?",
+        (latest,),
+    )]
+    body = []
+    for a in airlines:
+        plf_num, plf_raw = val(latest, "Passenger Load Factor", a)
+        otp_num, otp_raw = val(latest, "On Time Performance", a)
+        plf_d = otp_d = ""
+        if prev:
+            pn, _ = val(prev, "Passenger Load Factor", a)
+            if plf_num is not None and pn is not None and plf_num != pn:
+                cls = "chg-up" if plf_num > pn else "chg-down"
+                plf_d = f" <span class='{cls}'>{'▲' if plf_num>pn else '▼'}{abs(plf_num-pn):.2f}</span>"
+            po, _ = val(prev, "On Time Performance", a)
+            if otp_num is not None and po is not None and otp_num != po:
+                cls = "chg-up" if otp_num > po else "chg-down"
+                otp_d = f" <span class='{cls}'>{'▲' if otp_num>po else '▼'}{abs(otp_num-po):.2f}</span>"
+        body.append(
+            f"<tr><td class='slot'>{escape(a)}</td><td>{plf_raw or '—'}{plf_d}</td>"
+            f"<td>{otp_raw or '—'}{otp_d}</td></tr>"
+        )
+    conn.close()
+
+    return (
+        "<div class='card aviation'>"
+        f"<h3>🛫 National aviation activity <span class='muted'>· civilaviation.gov.in · as of {escape(latest)}</span></h3>"
+        f"<div class='stats compact'>{stats}</div>"
+        "<table><thead><tr><th>Airline</th><th>Load factor</th><th>On-time %</th></tr></thead>"
+        f"<tbody>{''.join(body)}</tbody></table>"
+        "<div class='muted' style='font-size:12px;margin-top:8px'>Deltas vs previous published day. "
+        "Updated daily by the Ministry of Civil Aviation (shows prior day).</div></div>"
     )
 
 
@@ -232,12 +326,15 @@ def render():
 
     if latest:
         tables = "".join(
-            sector_table(series, s["sector"], s["name"], latest, target_by) for s in config.SECTORS
+            sector_table(series, s["sector"], s["name"],
+                         s.get("airlines", config.AIRLINES), latest, target_by)
+            for s in config.SECTORS
         )
         charts = charts_section(series)
     else:
         tables = "<div class='empty'>No captures yet. Run <code>python3 capture.py</code>.</div>"
         charts = ""
+    aviation = aviation_section()
 
     html = f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
@@ -258,10 +355,18 @@ def render():
   .stat {{ background:var(--card); border:1px solid var(--line); border-radius:12px; padding:12px 16px; min-width:140px; }}
   .stat b {{ display:block; font-size:20px; }}
   .stat span {{ color:var(--muted); font-size:11px; text-transform:uppercase; letter-spacing:.04em; }}
+  .downloads {{ display:flex; gap:12px; flex-wrap:wrap; margin:0 0 18px; }}
+  .downloads a {{ display:inline-block; background:var(--card); border:1px solid var(--line);
+    border-radius:9px; padding:8px 14px; color:var(--h1); text-decoration:none; font-size:13px; font-weight:600; }}
+  .downloads a:hover {{ border-color:var(--h1); }}
   .legend {{ display:flex; gap:18px; flex-wrap:wrap; margin-bottom:18px; font-size:13px; color:var(--muted); }}
   .legend i {{ display:inline-block; width:12px; height:12px; border-radius:3px; margin-right:6px; vertical-align:-1px; }}
   .card {{ background:var(--card); border:1px solid var(--line); border-radius:14px; padding:16px 18px; margin-bottom:16px; }}
   .card h3 {{ margin:0 0 12px; font-size:17px; }}
+  .aviation {{ border-color:var(--h1); }}
+  .stats.compact {{ margin:6px 0 14px; gap:10px; }}
+  .stats.compact .stat {{ min-width:120px; padding:10px 14px; }}
+  .stats.compact .stat b {{ font-size:16px; }}
   table {{ width:100%; border-collapse:collapse; font-size:13px; }}
   th,td {{ text-align:right; padding:7px 9px; border-bottom:1px solid var(--line); white-space:nowrap; }}
   th:first-child, td:first-child {{ text-align:left; }}
@@ -283,10 +388,15 @@ def render():
 </style></head>
 <body><div class="wrap">
   <h1>✈️ Flight Fare Tracker</h1>
-  <div class="sub">Delhi–Mumbai &amp; Delhi–Bengaluru · IndiGo &amp; Air India · 5 time-slots × 3 booking horizons</div>
+  <div class="sub">Delhi–Mumbai · Delhi–Bengaluru · Delhi–Jaipur · Pune–Bengaluru · IndiGo &amp; Air India · 3 time-slots × 2 booking horizons</div>
   <div class="stats">{stats}</div>
+  <div class="downloads">
+    <a href="fares.xlsx" download>⬇︎ Download fares (Excel)</a>
+    <a href="aviation.xlsx" download>⬇︎ Download aviation stats (Excel)</a>
+  </div>
   <div class="legend">Booking horizon: {legend} &nbsp; · &nbsp; each cell shows latest fare and change vs previous capture</div>
   {tables}
+  {aviation}
   {charts}
   <footer>Source: SerpAPI / Google Flights. Prices in INR, nearest nonstop flight to each slot. Generated {generated}.</footer>
 </div></body></html>"""

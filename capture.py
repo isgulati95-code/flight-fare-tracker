@@ -23,6 +23,8 @@ import requests
 
 import config
 from render_dashboard import render
+from export_excel import build_fares_excel, build_aviation_excel
+import aviation_capture
 
 SERPAPI_URL = "https://serpapi.com/search.json"
 
@@ -178,6 +180,7 @@ def main():
             n = 0
             for f in parse_flights(payload, sec["sector"]):
                 try:
+                    before = conn.total_changes
                     conn.execute(
                         """
                         INSERT OR IGNORE INTO prices
@@ -194,8 +197,7 @@ def main():
                             config.CURRENCY,
                         ),
                     )
-                    if conn.total_changes:
-                        rows_inserted += conn.total_changes
+                    rows_inserted += conn.total_changes - before
                     n += 1
                 except sqlite3.Error as e:
                     print(f"(db error: {e})", end=" ")
@@ -204,8 +206,14 @@ def main():
 
     conn.close()
 
-    print(f"\nDone. {calls} API calls, {rows_inserted} new rows stored.")
+    print(f"\nDone. {calls} API calls, {rows_inserted} new fare rows stored.")
+
+    # National aviation metrics (separate free source; never blocks fares).
+    aviation_capture.capture()
+
     render()  # rebuild dashboard.html
+    build_fares_excel()  # refresh downloadable Excel
+    build_aviation_excel()
     print(f"Dashboard updated: {os.path.abspath(config.DASHBOARD_PATH)}")
 
 

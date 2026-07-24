@@ -41,7 +41,7 @@ jobs:
         run: |
           git config user.name  "fare-tracker-bot"
           git config user.email "actions@github.com"
-          git add prices.db dashboard.html index.html
+          git add prices.db aviation.db dashboard.html index.html fares.xlsx aviation.xlsx
           if git diff --cached --quiet; then
             echo "No changes to commit."
           else
