@@ -12,14 +12,17 @@ number of API calls per run is only  (number of SECTORS) x (number of HORIZONS).
 # (useful where only one carrier flies the route).
 # mode:
 #   "slots" (default) - metro routes: track IndiGo & Air India at 3 popular slots
-#   "all"             - non-metro routes: capture EVERY nonstop flight, ALL airlines
+#   "all"             - non-metro routes: capture nonstop flights across ALL airlines.
+#                       Flights with no bookable fare are dropped. Optional
+#                       "max_per_airline" keeps only that many flights per airline,
+#                       spread across the day.
 SECTORS = [
     {"sector": "DEL-BOM", "origin": "DEL", "destination": "BOM", "name": "Delhi → Mumbai"},
     {"sector": "DEL-BLR", "origin": "DEL", "destination": "BLR", "name": "Delhi → Bengaluru"},
     {"sector": "DEL-JAI", "origin": "DEL", "destination": "JAI", "name": "Delhi → Jaipur",
      "mode": "all"},
     {"sector": "PNQ-BLR", "origin": "PNQ", "destination": "BLR", "name": "Pune → Bengaluru",
-     "mode": "all"},
+     "mode": "all", "max_per_airline": 2},
 ]
 
 # --- Booking horizons: label -> number of days ahead of the capture date -----

@@ -113,16 +113,32 @@ def load():
     # Assemble ordered entries per sector (rows present at the latest capture).
     entries_by_sector = {}
     for sector, cfg in sec_cfg.items():
+        mode = cfg.get("mode", "slots")
         by_airline = {}
         for (s, a, rk), m in rowmeta.items():
             if s != sector:
                 continue
             byh = {h: series.get((sector, a, rk, h), []) for h in horizons}
-            if latest is not None and not any(any(p["date"] == latest for p in pts) for pts in byh.values()):
+            if latest is None:
                 continue
+            has_latest = any(any(p["date"] == latest for p in pts) for pts in byh.values())
+            if not has_latest:
+                continue
+            if mode == "all":
+                # Drop flights with no bookable fare at the latest capture
+                # (e.g. Alliance Air, which Google Flights lists without a price).
+                has_fare = any(any(p["date"] == latest and p["price"] is not None for p in pts)
+                               for pts in byh.values())
+                if not has_fare:
+                    continue
             by_airline.setdefault(a, []).append(
                 {"label": m["label"], "sub": m["sub"], "dep": m["dep"], "order": m["order"], "byh": byh})
-        if cfg.get("mode", "slots") == "all":
+
+        if mode == "all":
+            k = cfg.get("max_per_airline")
+            if k:
+                for a in by_airline:
+                    by_airline[a] = _spread_pick(sorted(by_airline[a], key=lambda e: e["order"]), k)
             airline_order = sorted(by_airline, key=lambda a: min(e["order"] for e in by_airline[a]))
         else:
             airline_order = [a for a in cfg.get("airlines", config.AIRLINES) if a in by_airline]
@@ -131,6 +147,26 @@ def load():
         ]
 
     return entries_by_sector, capture_dates, target_by, meta
+
+
+def _spread_pick(entries, k):
+    """Keep k entries spread across the day (nearest to k anchors in 07:00–21:00)."""
+    if len(entries) <= k:
+        return entries
+    lo, hi = 7 * 60, 21 * 60
+    anchors = [(lo + hi) / 2] if k == 1 else [lo + i * (hi - lo) / (k - 1) for i in range(k)]
+    chosen, used = [], set()
+    for anc in anchors:
+        best = None
+        for idx, e in enumerate(entries):
+            if idx in used:
+                continue
+            if best is None or abs(e["order"] - anc) < abs(entries[best]["order"] - anc):
+                best = idx
+        if best is not None:
+            used.add(best)
+            chosen.append(entries[best])
+    return sorted(chosen, key=lambda e: e["order"])
 
 
 def inr(n):
@@ -260,26 +296,35 @@ def _fmt_int(v):
 
 
 def aviation_section():
-    """Render the national aviation-activity panel from aviation.db, or ''."""
+    """Render the national aviation-activity panel from aviation.db, or ''.
+
+    The MoCA page updates each card independently, so different sections can
+    carry different report dates on the same load. We therefore resolve the
+    latest (and previous) report date PER SECTION.
+    """
     if not os.path.exists(AVIATION_DB):
         return ""
     conn = sqlite3.connect(AVIATION_DB)
     conn.row_factory = sqlite3.Row
     try:
-        recent = conn.execute(
-            "SELECT report_date, MAX(capture_date) mcd FROM aviation "
-            "GROUP BY report_date ORDER BY mcd DESC LIMIT 2"
-        ).fetchall()
+        conn.execute("SELECT 1 FROM aviation LIMIT 1")
     except sqlite3.OperationalError:
         conn.close()
         return ""
-    if not recent:
-        conn.close()
-        return ""
-    latest = recent[0]["report_date"]
-    prev = recent[1]["report_date"] if len(recent) > 1 else None
+
+    def recent_dates(section):
+        rows = conn.execute(
+            "SELECT report_date, MAX(capture_date) mcd FROM aviation WHERE section=? "
+            "GROUP BY report_date ORDER BY mcd DESC, report_date DESC LIMIT 2",
+            (section,),
+        ).fetchall()
+        latest = rows[0]["report_date"] if rows else None
+        prev = rows[1]["report_date"] if len(rows) > 1 else None
+        return latest, prev
 
     def val(report, section, item):
+        if report is None:
+            return (None, None)
         r = conn.execute(
             "SELECT value_num, value_raw FROM aviation WHERE report_date=? AND section=? AND item=?",
             (report, section, item),
@@ -287,18 +332,16 @@ def aviation_section():
         return (r["value_num"], r["value_raw"]) if r else (None, None)
 
     def traffic_stat(section, item, label):
+        latest, prev = recent_dates(section)
         num, raw = val(latest, section, item)
         delta = ""
         if prev:
             pnum, _ = val(prev, section, item)
-            if num is not None and pnum is not None:
-                d = num - pnum
-                if d:
-                    cls = "chg-up" if d > 0 else "chg-down"
-                    arr = "▲" if d > 0 else "▼"
-                    delta = f" <span class='{cls}'>{arr}{_fmt_int(abs(d))}</span>"
-        return (f"<div class='stat'><b>{raw or '—'}{delta}</b>"
-                f"<span>{label}</span></div>")
+            if num is not None and pnum is not None and num != pnum:
+                cls = "chg-up" if num > pnum else "chg-down"
+                arr = "▲" if num > pnum else "▼"
+                delta = f" <span class='{cls}'>{arr}{_fmt_int(abs(num - pnum))}</span>"
+        return f"<div class='stat'><b>{raw or '—'}{delta}</b><span>{label}</span></div>"
 
     stats = (
         traffic_stat("Domestic traffic", "Departing flights", "Dom · departing flights") +
@@ -306,26 +349,30 @@ def aviation_section():
         traffic_stat("International traffic", "Departing flights", "Int · departing flights") +
         traffic_stat("International traffic", "Departing Pax", "Int · departing pax")
     )
+    traffic_date = recent_dates("Domestic traffic")[0]
 
-    # Per-airline table: Load Factor + On-Time Performance
+    # Per-airline table: Load Factor + On-Time Performance (each with own dates)
+    plf_latest, plf_prev = recent_dates("Passenger Load Factor")
+    otp_latest, otp_prev = recent_dates("On Time Performance")
+
+    def pct_delta(latest, prev, section, a):
+        n, _ = val(latest, section, a)
+        p, _ = val(prev, section, a)
+        if n is not None and p is not None and n != p:
+            cls = "chg-up" if n > p else "chg-down"
+            return f" <span class='{cls}'>{'▲' if n>p else '▼'}{abs(n-p):.2f}</span>"
+        return ""
+
     airlines = [r["item"] for r in conn.execute(
         "SELECT DISTINCT item FROM aviation WHERE section='Passenger Load Factor' AND report_date=?",
-        (latest,),
+        (plf_latest,),
     )]
     body = []
     for a in airlines:
-        plf_num, plf_raw = val(latest, "Passenger Load Factor", a)
-        otp_num, otp_raw = val(latest, "On Time Performance", a)
-        plf_d = otp_d = ""
-        if prev:
-            pn, _ = val(prev, "Passenger Load Factor", a)
-            if plf_num is not None and pn is not None and plf_num != pn:
-                cls = "chg-up" if plf_num > pn else "chg-down"
-                plf_d = f" <span class='{cls}'>{'▲' if plf_num>pn else '▼'}{abs(plf_num-pn):.2f}</span>"
-            po, _ = val(prev, "On Time Performance", a)
-            if otp_num is not None and po is not None and otp_num != po:
-                cls = "chg-up" if otp_num > po else "chg-down"
-                otp_d = f" <span class='{cls}'>{'▲' if otp_num>po else '▼'}{abs(otp_num-po):.2f}</span>"
+        _, plf_raw = val(plf_latest, "Passenger Load Factor", a)
+        _, otp_raw = val(otp_latest, "On Time Performance", a)
+        plf_d = pct_delta(plf_latest, plf_prev, "Passenger Load Factor", a)
+        otp_d = pct_delta(otp_latest, otp_prev, "On Time Performance", a)
         body.append(
             f"<tr><td class='slot'>{escape(a)}</td><td>{plf_raw or '—'}{plf_d}</td>"
             f"<td>{otp_raw or '—'}{otp_d}</td></tr>"
@@ -334,12 +381,14 @@ def aviation_section():
 
     return (
         "<div class='card aviation'>"
-        f"<h3>🛫 National aviation activity <span class='muted'>· civilaviation.gov.in · as of {escape(latest)}</span></h3>"
+        "<h3>🛫 National aviation activity <span class='muted'>· civilaviation.gov.in</span></h3>"
+        f"<div class='muted' style='font-size:12px;margin:-6px 0 8px'>Traffic as of {escape(traffic_date or '—')}</div>"
         f"<div class='stats compact'>{stats}</div>"
+        f"<div class='muted' style='font-size:12px;margin:4px 0 6px'>Load factor &amp; on-time as of {escape(plf_latest or '—')}</div>"
         "<table><thead><tr><th>Airline</th><th>Load factor</th><th>On-time %</th></tr></thead>"
         f"<tbody>{''.join(body)}</tbody></table>"
         "<div class='muted' style='font-size:12px;margin-top:8px'>Deltas vs previous published day. "
-        "Updated daily by the Ministry of Civil Aviation (shows prior day).</div></div>"
+        "Updated daily by the Ministry of Civil Aviation (each metric shows the prior day).</div></div>"
     )
 
 
