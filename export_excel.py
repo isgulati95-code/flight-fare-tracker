@@ -51,26 +51,14 @@ def build_fares_excel(path=FARES_XLSX):
         ws.append([r[c] for c in cols])
     _autosize(ws)
 
-    # Sheet 2: curated view (exactly what the dashboard tables show)
-    from render_dashboard import load
-    entries_by_sector, _dates, _tb, _meta = load()
-    ws2 = wb.create_sheet("Tracked flights")
-    scols = ["capture_date", "sector", "airline", "row", "horizon",
-             "target_date", "dep_time", "flight_number", "price"]
+    # Sheet 2: the dashboard view (month-to-date avg / last / % change)
+    from render_dashboard import fare_summary_rows
+    ws2 = wb.create_sheet("Dashboard")
+    scols = ["month", "sector", "airline", "flight", "dep_time", "horizon",
+             "avg_price", "last_price", "pct_change", "samples"]
     _header(ws2, scols)
-    name_by = {s["sector"]: s["name"] for s in config.SECTORS}
-    flat = []
-    for sector, groups in entries_by_sector.items():
-        for airline, entries in groups:
-            for e in entries:
-                for horizon, pts in e["byh"].items():
-                    for p in pts:
-                        flat.append([p["date"], name_by.get(sector, sector), airline,
-                                     e["label"], horizon, p["target_date"],
-                                     p["dep_time"], p["flight_number"], p["price"]])
-    flat.sort(key=lambda r: (r[0], r[1], r[2], str(r[6]), r[4]))
-    for row in flat:
-        ws2.append(row)
+    for r in fare_summary_rows():
+        ws2.append([r[c] for c in scols])
     _autosize(ws2)
 
     conn.close()
@@ -83,9 +71,18 @@ def build_aviation_excel(path=AVIATION_XLSX):
     import os
     wb = Workbook()
 
-    # Sheet 1: full long/tidy history
-    ws = wb.active
-    ws.title = "Daily long"
+    # Sheet 1: the dashboard view (month-to-date avg / last / % change)
+    from render_dashboard import aviation_summary_rows
+    wsd = wb.active
+    wsd.title = "Dashboard"
+    dcols = ["month", "section", "item", "avg", "last", "pct_change", "samples"]
+    _header(wsd, dcols)
+    for r in aviation_summary_rows():
+        wsd.append([r[c] for c in dcols])
+    _autosize(wsd)
+
+    # Sheet 2: full long/tidy history
+    ws = wb.create_sheet("Daily long")
     cols = ["capture_date", "report_date", "section", "item",
             "value_num", "value_raw", "unit", "source"]
     _header(ws, cols)
