@@ -1,18 +1,10 @@
 name: Daily fare capture
 
 on:
-  schedule:
-    # GitHub's scheduled runs are best-effort — they can be delayed or skipped.
-    # So we make several attempts spread through the day. The capture is idempotent
-    # (one capture per calendar day; later runs just dedupe and add nothing), so the
-    # FIRST attempt GitHub actually runs "wins" and the rest are harmless no-ops.
-    # For a whole day to be missed, every one of these would have to be skipped.
-    # Times are UTC; IST = UTC + 5:30. Odd minute (:37) avoids the busiest slots.
-    - cron: "37 4 * * *"     # 10:07 IST  (primary)
-    - cron: "37 6 * * *"     # 12:07 IST  (backup)
-    - cron: "37 9 * * *"     # 14:37 IST  (backup)
-    - cron: "37 13 * * *"    # 18:37 IST  (backup)
-  workflow_dispatch: {}   # lets you run it manually from the Actions tab
+  # Manual only. Press "Run workflow" on the Actions tab once a day.
+  # No scheduled timer: GitHub's cron proved unreliable, whereas a manual run
+  # always executes. This also keeps usage to one run/day, within the free API tier.
+  workflow_dispatch: {}
 
 # Allow the job to commit the updated database + dashboard back to the repo.
 permissions:
@@ -49,8 +41,6 @@ jobs:
         run: |
           git config user.name  "fare-tracker-bot"
           git config user.email "actions@github.com"
-          # The databases are the source of truth for "is there new data?".
-          # If neither changed, a later same-day run does nothing at all.
           git add prices.db aviation.db
           if git diff --cached --quiet; then
             echo "No new data today — skipping (dashboard already up to date)."
