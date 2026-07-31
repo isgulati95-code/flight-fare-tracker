@@ -106,26 +106,28 @@ def _minutes(hhmm):
     return int(h) * 60 + int(m)
 
 
-def parse_flights(payload, sector):
-    """Yield dicts for every nonstop itinerary in a SerpAPI response."""
+def parse_flights(payload, sector, max_stops=0):
+    """Yield dicts for every itinerary with <= max_stops in a SerpAPI response.
+
+    For a multi-leg (one-stop) itinerary the identity is taken from the first
+    leg (marketing carrier + flight number + departure time), the arrival from
+    the last leg, and the price/duration from the whole itinerary.
+    """
     itineraries = (payload.get("best_flights") or []) + (payload.get("other_flights") or [])
     for it in itineraries:
         legs = it.get("flights") or []
-        stops = max(len(legs) - 1, 0)
-        if stops > 0:
-            continue  # only direct flights for these sectors
         if not legs:
             continue
-        leg = legs[0]
-        airline = leg.get("airline")
-        dep_time = _hhmm((leg.get("departure_airport") or {}).get("time"))
-        arr_time = _hhmm((leg.get("arrival_airport") or {}).get("time"))
+        stops = len(legs) - 1
+        if stops > max_stops:
+            continue
+        first, last = legs[0], legs[-1]
         yield {
-            "airline": airline,
-            "flight_number": leg.get("flight_number"),
-            "dep_time": dep_time,
-            "arr_time": arr_time,
-            "duration_min": it.get("total_duration") or leg.get("duration"),
+            "airline": first.get("airline"),
+            "flight_number": first.get("flight_number"),
+            "dep_time": _hhmm((first.get("departure_airport") or {}).get("time")),
+            "arr_time": _hhmm((last.get("arrival_airport") or {}).get("time")),
+            "duration_min": it.get("total_duration"),
             "stops": stops,
             "price": it.get("price"),
         }
@@ -178,7 +180,7 @@ def main():
                 continue
 
             n = 0
-            for f in parse_flights(payload, sec["sector"]):
+            for f in parse_flights(payload, sec["sector"], sec.get("max_stops", 0)):
                 try:
                     before = conn.total_changes
                     conn.execute(

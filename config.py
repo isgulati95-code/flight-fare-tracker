@@ -1,52 +1,39 @@
 """
 Configuration for the flight-fare tracker.
 
-Edit this file to change which sectors, flights, and booking horizons are tracked.
+Edit this file to change which routes and booking horizon are tracked.
 One SerpAPI Google Flights call returns EVERY flight for a route+date, so the
-number of API calls per run is only  (number of SECTORS) x (number of HORIZONS).
+number of API calls per run is  (number of SECTORS) x (number of HORIZONS).
+Currently 8 routes x 1 horizon = 8 calls/day (~240/month, within the free 250).
 """
 
-# --- Sectors to search (one API call per sector per horizon) -----------------
-# Each search returns all airlines and all departure times for that route/date.
-# Optional per-sector "airlines" overrides the global AIRLINES list below
-# (useful where only one carrier flies the route).
-# mode:
-#   "slots" (default) - metro routes: track IndiGo & Air India at 3 popular slots
-#   "all"             - non-metro routes: capture nonstop flights across ALL airlines.
-#                       Flights with no bookable fare are dropped. Optional
-#                       "max_per_airline" keeps only that many flights per airline,
-#                       spread across the day.
+# --- Routes to search --------------------------------------------------------
+# scope:     "domestic" or "international" (used only for labelling)
+# max_stops: 0 = nonstop only; 1 = also keep one-stop itineraries (e.g. London)
 SECTORS = [
-    {"sector": "DEL-BOM", "origin": "DEL", "destination": "BOM", "name": "Delhi → Mumbai"},
-    {"sector": "DEL-BLR", "origin": "DEL", "destination": "BLR", "name": "Delhi → Bengaluru"},
-    {"sector": "DEL-JAI", "origin": "DEL", "destination": "JAI", "name": "Delhi → Jaipur",
-     "mode": "all"},
-    {"sector": "PNQ-BLR", "origin": "PNQ", "destination": "BLR", "name": "Pune → Bengaluru",
-     "mode": "all", "max_per_airline": 2},
+    {"sector": "DEL-BOM", "origin": "DEL", "destination": "BOM", "name": "Delhi → Mumbai",       "scope": "domestic",      "max_stops": 0},
+    {"sector": "BLR-BOM", "origin": "BLR", "destination": "BOM", "name": "Bengaluru → Mumbai",   "scope": "domestic",      "max_stops": 0},
+    {"sector": "DEL-HYD", "origin": "DEL", "destination": "HYD", "name": "Delhi → Hyderabad",     "scope": "domestic",      "max_stops": 0},
+    {"sector": "DEL-GOI", "origin": "DEL", "destination": "GOI", "name": "Delhi → Goa",           "scope": "domestic",      "max_stops": 0},
+    {"sector": "BOM-MAA", "origin": "BOM", "destination": "MAA", "name": "Mumbai → Chennai",      "scope": "domestic",      "max_stops": 0},
+    {"sector": "DEL-DXB", "origin": "DEL", "destination": "DXB", "name": "Delhi → Dubai",         "scope": "international", "max_stops": 0},
+    {"sector": "BOM-SIN", "origin": "BOM", "destination": "SIN", "name": "Mumbai → Singapore",    "scope": "international", "max_stops": 0},
+    {"sector": "DEL-LHR", "origin": "DEL", "destination": "LHR", "name": "Delhi → London",        "scope": "international", "max_stops": 1},
 ]
 
-# --- Booking horizons: label -> number of days ahead of the capture date -----
-# API calls/day = len(SECTORS) x len(HORIZONS) = 4 x 2 = 8  (~240/month).
+# --- Booking horizon: label -> number of days ahead of the capture date -------
 HORIZONS = [
-    ("+1wk", 7),
-    ("+3wk", 21),
+    ("+2wk", 14),
 ]
 
-# --- Airlines to track (default for sectors without a per-sector override) ----
-AIRLINES = ["IndiGo", "Air India"]
+# --- Dashboard display -------------------------------------------------------
+# Every flight is STORED (full history -> Excel). The dashboard shows at most
+# this many flights per airline per route (spread across the day), so it stays
+# readable. The yield tiles are still computed over ALL captured flights.
+MAX_PER_AIRLINE_DISPLAY = 5
 
-# --- Time slots across the day -----------------------------------------------
-# 3 most-popular departure windows. For each sector x airline we pick the
-# nonstop flight nearest each anchor. Adding slots costs NO extra API calls.
-# (label, anchor time HH:MM 24h)
-TIME_SLOTS = [
-    ("Early morning", "06:30"),
-    ("Morning",       "09:00"),
-    ("Evening",       "18:30"),
-]
-
-# A flight may fill a slot only if within this many minutes of the anchor.
-SLOT_WINDOW_MIN = 120
+# Airlines that get their own yield / load-factor tiles at the top.
+FEATURED_AIRLINES = ["IndiGo", "Air India"]
 
 # --- Search parameters -------------------------------------------------------
 CURRENCY = "INR"

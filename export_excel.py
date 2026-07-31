@@ -51,11 +51,11 @@ def build_fares_excel(path=FARES_XLSX):
         ws.append([r[c] for c in cols])
     _autosize(ws)
 
-    # Sheet 2: the dashboard view (month-to-date avg / last / % change)
+    # Sheet 2: the dashboard view (month-to-date avg / latest / % vs avg)
     from render_dashboard import fare_summary_rows
     ws2 = wb.create_sheet("Dashboard")
-    scols = ["month", "sector", "airline", "flight", "dep_time", "horizon",
-             "avg_price", "last_price", "pct_change", "samples"]
+    scols = ["month", "route", "scope", "airline", "flight", "dep_time", "stops",
+             "avg_price", "last_price", "pct_vs_avg", "samples"]
     _header(ws2, scols)
     for r in fare_summary_rows():
         ws2.append([r[c] for c in scols])
@@ -75,7 +75,7 @@ def build_aviation_excel(path=AVIATION_XLSX):
     from render_dashboard import aviation_summary_rows
     wsd = wb.active
     wsd.title = "Dashboard"
-    dcols = ["month", "section", "item", "avg", "last", "pct_change", "samples"]
+    dcols = ["month", "section", "item", "avg"]
     _header(wsd, dcols)
     for r in aviation_summary_rows():
         wsd.append([r[c] for c in dcols])
