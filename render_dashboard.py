@@ -258,6 +258,220 @@ def aviation_summary():
 
 
 # --------------------------------------------------------------------------- #
+# period helpers (month-over-month, quarter-over-quarter)
+# --------------------------------------------------------------------------- #
+def months_back(ym, k):
+    y, m = int(ym[:4]), int(ym[5:7])
+    m -= k
+    while m <= 0:
+        m += 12
+        y -= 1
+    return f"{y:04d}-{m:02d}"
+
+
+def quarter_of(ym):
+    return (int(ym[:4]), (int(ym[5:7]) - 1) // 3 + 1)
+
+
+def quarter_months(year, q):
+    s = (q - 1) * 3 + 1
+    return [f"{year:04d}-{s+i:02d}" for i in range(3)]
+
+
+def prev_quarter(year, q):
+    return (year - 1, 4) if q == 1 else (year, q - 1)
+
+
+def build_periods(month):
+    lm = months_back(month, 1)
+    y, q = quarter_of(month)
+    py, pq = prev_quarter(y, q)
+    return {
+        "tm": month, "lm": lm,
+        "tq": set(quarter_months(y, q)), "lq": set(quarter_months(py, pq)),
+        "tm_l": month_label(month), "lm_l": month_label(lm),
+        "tq_l": f"Q{q} {y}", "lq_l": f"Q{pq} {py}",
+    }
+
+
+SCOPE_OF = {s["sector"]: s["scope"] for s in config.SECTORS}
+
+
+def _period_avg(pts, months):
+    vals = [p["price"] for p in pts if p["price"] is not None and month_of(p["date"]) in months]
+    return sum(vals) / len(vals) if vals else None
+
+
+def _latest_in_month(pts, m):
+    mp = [p["price"] for p in pts if p["price"] is not None and month_of(p["date"]) == m]
+    return mp[-1] if mp else None
+
+
+def yield_median(flights, scope, airline, mode, P):
+    """Median % change across the cohort (airline/scope). mode: latest|mom|qoq."""
+    pcts = []
+    for (sec, air, _fk), f in flights.items():
+        if airline and air != airline:
+            continue
+        if scope and SCOPE_OF.get(sec) != scope:
+            continue
+        pts = f["pts"]
+        if mode == "latest":
+            a = _period_avg(pts, {P["tm"]})
+            last = _latest_in_month(pts, P["tm"])
+            if a and last is not None:
+                pcts.append((last - a) / a * 100)
+        elif mode == "mom":
+            a, b = _period_avg(pts, {P["tm"]}), _period_avg(pts, {P["lm"]})
+            if a is not None and b:
+                pcts.append((a - b) / b * 100)
+        elif mode == "qoq":
+            a, b = _period_avg(pts, P["tq"]), _period_avg(pts, P["lq"])
+            if a is not None and b:
+                pcts.append((a - b) / b * 100)
+    return (statistics.median(pcts), len(pcts)) if pcts else (None, 0)
+
+
+def yield_matrix(flights, P):
+    cols = [("latest", f"Latest vs {P['tm_l']}"),
+            ("mom", f"{P['tm_l']} vs {P['lm_l']}"),
+            ("qoq", f"{P['tq_l']} vs {P['lq_l']}")]
+    scopes = [("All routes", None), ("Domestic", "domestic"), ("International", "international")]
+    airlines = [(a, a) for a in config.FEATURED_AIRLINES] + [("Overall", None)]
+    head = "".join(f"<th class='num'>{escape(lbl)}</th>" for _m, lbl in cols)
+    body = []
+    for sc_label, sc in scopes:
+        body.append(f"<tr class='air'><td colspan='{len(cols)+1}'>{sc_label}</td></tr>")
+        for air_label, air in airlines:
+            cells = ""
+            for mode, _lbl in cols:
+                med, n = yield_median(flights, sc, air, mode, P)
+                title = f"{n} flights" if n else "no matched pair"
+                cells += f"<td class='num' title='{title}'>{pct_html(med, good_up=False)}</td>"
+            body.append(f"<tr><td class='rowlabel'>{escape(air_label)}</td>{cells}</tr>")
+    return (
+        "<div class='card'><h3>Yield change "
+        "<span class='hnote'>median % across captured flights · ▲ = fares higher</span></h3>"
+        "<div class='scrollx'><table><thead><tr><th>Airline</th>" + head +
+        "</tr></thead><tbody>" + "".join(body) + "</tbody></table></div></div>"
+    )
+
+
+# --------------------------------------------------------------------------- #
+# aviation period aggregation (load factor + departures across periods)
+# --------------------------------------------------------------------------- #
+def aviation_rows():
+    if not os.path.exists(AVIATION_DB):
+        return []
+    conn = sqlite3.connect(AVIATION_DB)
+    conn.row_factory = sqlite3.Row
+    try:
+        raw = conn.execute(
+            "SELECT report_date, section, item, value_num FROM aviation WHERE value_num IS NOT NULL"
+        ).fetchall()
+    except sqlite3.OperationalError:
+        conn.close()
+        return []
+    conn.close()
+    out = []
+    for r in raw:
+        d = _report_dt(r["report_date"])
+        out.append({"rd": r["report_date"], "dt": d,
+                    "rmonth": d.strftime("%Y-%m") if d else None,
+                    "section": r["section"], "item": r["item"], "val": r["value_num"]})
+    return out
+
+
+def av_avg(rows, section, item, months):
+    vals = [r["val"] for r in rows
+            if r["section"] == section and r["item"] == item and r["rmonth"] in months]
+    return sum(vals) / len(vals) if vals else None
+
+
+def av_latest(rows, section, item):
+    cand = [r for r in rows if r["section"] == section and r["item"] == item and r["dt"]]
+    if not cand:
+        return None
+    cand.sort(key=lambda r: r["dt"])
+    return cand[-1]
+
+
+def loadfactor_matrix(rows, P):
+    sec = "Passenger Load Factor"
+    all_air = sorted({r["item"] for r in rows if r["section"] == sec})
+    periods = [("This month", {P["tm"]}, P["tm_l"]),
+               ("Last month", {P["lm"]}, P["lm_l"]),
+               ("Last quarter", P["lq"], P["lq_l"])]
+    head = "".join(f"<th class='num'>{escape(lbl)}<span class='hsub'>{escape(pl)}</span></th>"
+                   for lbl, _m, pl in periods)
+
+    def cell(item, months):
+        if item == "__ALL__":
+            vs = [av_avg(rows, sec, a, months) for a in all_air]
+            vs = [v for v in vs if v is not None]
+            v = sum(vs) / len(vs) if vs else None
+        else:
+            v = av_avg(rows, sec, item, months)
+        return f"<td class='num'>{v:.1f}%</td>" if v is not None else "<td class='num muted'>—</td>"
+
+    body = []
+    for a in config.FEATURED_AIRLINES:
+        body.append(f"<tr><td class='rowlabel'>{escape(a)}</td>"
+                    + "".join(cell(a, m) for _l, m, _p in periods) + "</tr>")
+    body.append("<tr><td class='rowlabel'>Overall industry</td>"
+                + "".join(cell("__ALL__", m) for _l, m, _p in periods) + "</tr>")
+    return (
+        "<div class='card aviation'><h3>Load factor "
+        "<span class='chip'>civilaviation.gov.in</span>"
+        "<span class='hnote'>monthly / quarterly average, %</span></h3>"
+        "<div class='scrollx'><table><thead><tr><th>Airline</th>" + head +
+        "</tr></thead><tbody>" + "".join(body) + "</tbody></table></div></div>"
+    )
+
+
+def departures_matrix(rows, P):
+    secs = [("Domestic traffic", "Domestic departures / day"),
+            ("International traffic", "International departures / day")]
+    item = "Departing flights"
+
+    def v(x):
+        return ind(x) if x is not None else "—"
+
+    body = []
+    for section, label in secs:
+        tm = av_avg(rows, section, item, {P["tm"]})
+        lm = av_avg(rows, section, item, {P["lm"]})
+        tq = av_avg(rows, section, item, P["tq"])
+        lq = av_avg(rows, section, item, P["lq"])
+        latest = av_latest(rows, section, item)
+        lastval = latest["val"] if latest else None
+        lastday = latest["rd"] if latest else ""
+        mom = ((tm - lm) / lm * 100) if (tm is not None and lm) else None
+        vsavg = ((lastval - tm) / tm * 100) if (lastval is not None and tm) else None
+        qoq = ((tq - lq) / lq * 100) if (tq is not None and lq) else None
+        body.append(
+            f"<tr><td class='rowlabel'>{label}</td>"
+            f"<td class='num'>{v(lastval)} <span class='sub2'>{escape(lastday[:6])}</span><br>{pct_html(vsavg, good_up=True)}</td>"
+            f"<td class='num'>{v(tm)}<br>{pct_html(mom, good_up=True)}</td>"
+            f"<td class='num muted'>{v(lm)}</td>"
+            f"<td class='num'>{v(tq)}<br>{pct_html(qoq, good_up=True)}</td>"
+            f"<td class='num muted'>{v(lq)}</td></tr>"
+        )
+    head = (f"<th class='num'>Latest day<span class='hsub'>vs {P['tm_l']} avg</span></th>"
+            f"<th class='num'>{P['tm_l']}<span class='hsub'>vs {P['lm_l']}</span></th>"
+            f"<th class='num'>{P['lm_l']}</th>"
+            f"<th class='num'>{P['tq_l']}<span class='hsub'>vs {P['lq_l']}</span></th>"
+            f"<th class='num'>{P['lq_l']}</th>")
+    return (
+        "<div class='card'><h3>Daily departures "
+        "<span class='chip'>civilaviation.gov.in</span>"
+        "<span class='hnote'>flights per day</span></h3>"
+        "<div class='scrollx'><table><thead><tr><th>Metric</th>" + head +
+        "</tr></thead><tbody>" + "".join(body) + "</tbody></table></div></div>"
+    )
+
+
+# --------------------------------------------------------------------------- #
 # top tiles
 # --------------------------------------------------------------------------- #
 def _tile(value_html, label, sub=""):
@@ -401,16 +615,20 @@ def render():
     else:
         tables = "<div class='empty'>No captures yet. The first run will populate the dashboard.</div>"
 
-    groups_html = (
-        "<div class='tilegroup'><div class='glabel'>Yield change "
-        f"<span class='gnote'>median · latest vs {ml} avg · all captured flights</span></div>"
-        f"<div class='kpis'>{yield_tiles(flights, month)}</div></div>"
-        "<div class='tilegroup'><div class='glabel'>Load factor "
-        f"<span class='gnote'>{av_month} average</span></div>"
-        f"<div class='kpis'>{loadfactor_tiles(av, av_month)}</div></div>"
-        "<div class='tilegroup'><div class='glabel'>Daily activity</div>"
-        f"<div class='kpis'>{activity_tiles(av, flights, month, av_month)}</div></div>"
-    )
+    P = build_periods(month) if month else None
+    av_rows = aviation_rows()
+    days_tm = sum(1 for d in capture_dates if month_of(d) == month)
+    if P:
+        groups_html = (
+            yield_matrix(flights, P)
+            + loadfactor_matrix(av_rows, P)
+            + departures_matrix(av_rows, P)
+            + f"<p class='pnote'>{escape(P['tm_l'])} and {escape(P['tq_l'])} are month-/quarter-to-date "
+              f"(partial — {days_tm} fare-capture day(s) so far). Yield = median price change across "
+              "all captured flights; load factor has no domestic/intl split in the source data.</p>"
+        )
+    else:
+        groups_html = ""
 
     html = f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
@@ -455,7 +673,11 @@ def render():
   th,td {{ text-align:right; padding:9px 10px; border-bottom:1px solid var(--line); white-space:nowrap; }}
   th:first-child, td:first-child {{ text-align:left; }}
   thead th {{ color:var(--muted); font-weight:600; font-size:11.5px; text-transform:uppercase; letter-spacing:.03em; border-bottom:1px solid var(--grid); }}
-  th .hsub {{ text-transform:none; letter-spacing:0; font-weight:500; }}
+  th .hsub {{ display:block; text-transform:none; letter-spacing:0; font-weight:500; color:var(--muted); }}
+  .scrollx {{ overflow-x:auto; -webkit-overflow-scrolling:touch; }}
+  .hnote {{ font-weight:500; text-transform:none; letter-spacing:0; color:var(--muted); font-size:11.5px; }}
+  .sub2 {{ font-size:10px; color:var(--muted); font-weight:400; }}
+  .pnote {{ color:var(--muted); font-size:12px; margin:2px 0 20px; line-height:1.6; }}
   tbody tr:last-child td {{ border-bottom:none; }}
   td.rowlabel {{ font-weight:600; }}
   tr.air td {{ background:var(--card2); font-weight:700; font-size:12.5px; text-transform:uppercase; letter-spacing:.01em; color:var(--ink2); }}
@@ -480,11 +702,11 @@ def render():
 <body><div class="wrap">
   <header>
     <h1>✈️ Flight Fare Tracker</h1>
-    <p class="sub">8 routes · booking horizon +2 weeks · up to 5 flights per airline per route (spread across the day).
-    Prices are the month-to-date average; the coloured figure is the latest capture vs that average.
-    <b>Latest capture: {latest_disp}</b> · {len(capture_dates)} day(s) this month.</p>
+    <p class="sub">8 routes · booking horizon +2 weeks. Fares from Google Flights; load factor &amp; departures
+    from the Ministry of Civil Aviation. <b>Latest capture: {latest_disp}</b> · {days_tm} day(s) in {ml}.</p>
   </header>
 
+  <h2 style="font-size:18px;margin:26px 0 12px;letter-spacing:-.01em">Period comparisons</h2>
   {groups_html}
 
   <h2 style="font-size:18px;margin:30px 0 12px;letter-spacing:-.01em">Routes</h2>
