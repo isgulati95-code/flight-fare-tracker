@@ -566,6 +566,77 @@ def aviation_summary_rows():
     return out
 
 
+def period_analytics_blocks():
+    """The period matrices as plain-value blocks for Excel: list of
+    (title, header_list, [row_lists]). Mirrors the dashboard period tables."""
+    flights, capture_dates, _m = load()
+    month = month_of(capture_dates[-1]) if capture_dates else None
+    if not month:
+        return []
+    P = build_periods(month)
+    rows_av = aviation_rows()
+    blocks = []
+
+    def R(x, d=1):
+        return round(x, d) if x is not None else None
+
+    # 1) Yield change (median %) — scope x airline x period
+    yhead = ["Scope", "Airline",
+             f"Latest vs {P['tm_l']} (%)", f"{P['tm_l']} vs {P['lm_l']} (%)",
+             f"{P['tq_l']} vs {P['lq_l']} (%)"]
+    airlines = [(a, a) for a in config.FEATURED_AIRLINES] + [("Overall", None)]
+    ydata = []
+    for sc_label, sc in [("All routes", None), ("Domestic", "domestic"),
+                         ("International", "international")]:
+        for air_label, air in airlines:
+            vals = [R(yield_median(flights, sc, air, m, P)[0], 2)
+                    for m in ("latest", "mom", "qoq")]
+            ydata.append([sc_label, air_label] + vals)
+    blocks.append(("YIELD CHANGE — median % across captured flights (+ = fares higher)",
+                   yhead, ydata))
+
+    # 2) Load factor (%) — airline x period
+    sec = "Passenger Load Factor"
+    all_air = sorted({r["item"] for r in rows_av if r["section"] == sec})
+
+    def lf(item, months):
+        if item == "__ALL__":
+            vs = [av_avg(rows_av, sec, a, months) for a in all_air]
+            vs = [v for v in vs if v is not None]
+            return R(sum(vs) / len(vs)) if vs else None
+        return R(av_avg(rows_av, sec, item, months))
+
+    lhead = ["Airline", f"This month {P['tm_l']} (%)", f"Last month {P['lm_l']} (%)",
+             f"Last quarter {P['lq_l']} (%)"]
+    ldata = [[a, lf(a, {P["tm"]}), lf(a, {P["lm"]}), lf(a, P["lq"])]
+             for a in config.FEATURED_AIRLINES]
+    ldata.append(["Overall industry", lf("__ALL__", {P["tm"]}),
+                  lf("__ALL__", {P["lm"]}), lf("__ALL__", P["lq"])])
+    blocks.append(("LOAD FACTOR — monthly / quarterly average (%)", lhead, ldata))
+
+    # 3) Daily departures (flights/day)
+    dhead = ["Metric", "Latest day", f"vs {P['tm_l']} avg (%)",
+             f"{P['tm_l']} avg", f"MoM vs {P['lm_l']} (%)", f"{P['lm_l']} avg",
+             f"{P['tq_l']} avg", f"QoQ vs {P['lq_l']} (%)", f"{P['lq_l']} avg"]
+    ddata = []
+    item = "Departing flights"
+    for section, label in [("Domestic traffic", "Domestic departures/day"),
+                           ("International traffic", "International departures/day")]:
+        tm = av_avg(rows_av, section, item, {P["tm"]})
+        lm = av_avg(rows_av, section, item, {P["lm"]})
+        tq = av_avg(rows_av, section, item, P["tq"])
+        lq = av_avg(rows_av, section, item, P["lq"])
+        lt = av_latest(rows_av, section, item)
+        lv = lt["val"] if lt else None
+        mom = ((tm - lm) / lm * 100) if (tm is not None and lm) else None
+        vsa = ((lv - tm) / tm * 100) if (lv is not None and tm) else None
+        qoq = ((tq - lq) / lq * 100) if (tq is not None and lq) else None
+        ddata.append([label, R(lv, 0), R(vsa), R(tm, 0), R(mom), R(lm, 0),
+                      R(tq, 0), R(qoq), R(lq, 0)])
+    blocks.append(("DAILY DEPARTURES — flights per day", dhead, ddata))
+    return blocks
+
+
 # --------------------------------------------------------------------------- #
 # aviation detail panel
 # --------------------------------------------------------------------------- #

@@ -61,6 +61,23 @@ def build_fares_excel(path=FARES_XLSX):
         ws2.append([r[c] for c in scols])
     _autosize(ws2)
 
+    # Sheet 3: period analytics (MoM / QoQ), mirrors the dashboard matrices
+    from render_dashboard import period_analytics_blocks
+    ws3 = wb.create_sheet("Period analytics")
+    rownum = 1
+    for title, header, data in period_analytics_blocks():
+        ws3.cell(row=rownum, column=1, value=title).font = Font(bold=True)
+        rownum += 1
+        for ci, h in enumerate(header, start=1):
+            ws3.cell(row=rownum, column=ci, value=h).font = Font(bold=True)
+        rownum += 1
+        for drow in data:
+            for ci, v in enumerate(drow, start=1):
+                ws3.cell(row=rownum, column=ci, value=v)
+            rownum += 1
+        rownum += 1  # blank row between blocks
+    _autosize(ws3)
+
     conn.close()
     wb.save(path)
     return path
