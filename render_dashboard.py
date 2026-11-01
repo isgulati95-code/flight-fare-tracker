@@ -284,12 +284,13 @@ def prev_quarter(year, q):
 
 def build_periods(month):
     lm = months_back(month, 1)
+    lm2 = months_back(month, 2)
     y, q = quarter_of(month)
     py, pq = prev_quarter(y, q)
     return {
-        "tm": month, "lm": lm,
+        "tm": month, "lm": lm, "lm2": lm2,
         "tq": set(quarter_months(y, q)), "lq": set(quarter_months(py, pq)),
-        "tm_l": month_label(month), "lm_l": month_label(lm),
+        "tm_l": month_label(month), "lm_l": month_label(lm), "lm2_l": month_label(lm2),
         "tq_l": f"Q{q} {y}", "lq_l": f"Q{pq} {py}",
     }
 
@@ -308,7 +309,9 @@ def _latest_in_month(pts, m):
 
 
 def yield_median(flights, scope, airline, mode, P):
-    """Median % change across the cohort (airline/scope). mode: latest|mom|qoq."""
+    """Median % change across the cohort (airline/scope). mode: latest|mom|pmom|qoq.
+
+    pmom = prior month-over-month (last month vs the month before)."""
     pcts = []
     for (sec, air, _fk), f in flights.items():
         if airline and air != airline:
@@ -325,6 +328,10 @@ def yield_median(flights, scope, airline, mode, P):
             a, b = _period_avg(pts, {P["tm"]}), _period_avg(pts, {P["lm"]})
             if a is not None and b:
                 pcts.append((a - b) / b * 100)
+        elif mode == "pmom":
+            a, b = _period_avg(pts, {P["lm"]}), _period_avg(pts, {P["lm2"]})
+            if a is not None and b:
+                pcts.append((a - b) / b * 100)
         elif mode == "qoq":
             a, b = _period_avg(pts, P["tq"]), _period_avg(pts, P["lq"])
             if a is not None and b:
@@ -333,7 +340,7 @@ def yield_median(flights, scope, airline, mode, P):
 
 
 def yield_matrix(flights, P):
-    cols = [("latest", f"Latest vs {P['tm_l']}"),
+    cols = [("pmom", f"{P['lm_l']} vs {P['lm2_l']}"),
             ("mom", f"{P['tm_l']} vs {P['lm_l']}"),
             ("qoq", f"{P['tq_l']} vs {P['lq_l']}")]
     scopes = [("All routes", None), ("Domestic", "domestic"), ("International", "international")]
@@ -582,7 +589,7 @@ def period_analytics_blocks():
 
     # 1) Yield change (median %) — scope x airline x period
     yhead = ["Scope", "Airline",
-             f"Latest vs {P['tm_l']} (%)", f"{P['tm_l']} vs {P['lm_l']} (%)",
+             f"{P['lm_l']} vs {P['lm2_l']} (%)", f"{P['tm_l']} vs {P['lm_l']} (%)",
              f"{P['tq_l']} vs {P['lq_l']} (%)"]
     airlines = [(a, a) for a in config.FEATURED_AIRLINES] + [("Overall", None)]
     ydata = []
@@ -590,7 +597,7 @@ def period_analytics_blocks():
                          ("International", "international")]:
         for air_label, air in airlines:
             vals = [R(yield_median(flights, sc, air, m, P)[0], 2)
-                    for m in ("latest", "mom", "qoq")]
+                    for m in ("pmom", "mom", "qoq")]
             ydata.append([sc_label, air_label] + vals)
     blocks.append(("YIELD CHANGE — median % across captured flights (+ = fares higher)",
                    yhead, ydata))
