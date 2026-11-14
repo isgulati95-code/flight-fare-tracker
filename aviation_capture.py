@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Daily capture of national aviation metrics from the Ministry of Civil Aviation
-home-page dashboard (https://www.civilaviation.gov.in).
+dashboard (https://www.civilaviation.gov.in/dashboard).
 
 It publishes, for the previous day:
   * Domestic traffic     - departing/arriving flights & pax, movements, footfalls
@@ -11,6 +11,10 @@ It publishes, for the previous day:
 
 Values are stored in aviation.db in a tidy long format so the history builds up
 over time. A plain browser User-Agent is required (the default one is blocked).
+
+NOTE (Nov 2026): MoCA redesigned the site and moved the daily metrics off the
+home page onto /dashboard, rebuilt as Bootstrap tab panes. The section/item names
+are kept identical to the old schema so the existing aviation.db history continues.
 """
 
 import re
@@ -19,18 +23,29 @@ import datetime as dt
 
 import requests
 
-URL = "https://www.civilaviation.gov.in/"
+URL = "https://www.civilaviation.gov.in/dashboard"
 AVIATION_DB = "aviation.db"
 UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/126.0 Safari/537.36")
 
-SECTIONS = ["Domestic traffic", "International traffic",
-            "Passenger Load Factor", "On Time Performance"]
+# Dashboard tab-pane id -> canonical section name (unchanged from the old schema).
+# The page also carries a cumulative "udan" tab; it is not a daily metric, so skip it.
+TAB_SECTIONS = [
+    ("domestic", "Domestic traffic"),
+    ("international", "International traffic"),
+    ("otp", "On Time Performance"),
+    ("plf", "Passenger Load Factor"),
+]
+_PANE_IDS = ["domestic", "international", "otp", "plf", "udan"]
 
-_PAIR = re.compile(
-    r'field--name-field-label[^>]*>(?P<label>.*?)</div>\s*'
-    r'<div class="field field--name-field-counting-number[^>]*>(?P<value>.*?)</div>',
+# Each metric is a card:
+#   <h3/h4 class="my-label">LABEL</h3> <h3 data-once="heading-fix">VALUE</h3>
+_CARD = re.compile(
+    r'<h[34] class="my-label">\s*(?P<label>.*?)\s*</h[34]>\s*'
+    r'<h3 data-once="heading-fix">\s*(?P<value>.*?)\s*</h3>',
     re.S)
+# Each pane carries its own report date: <div class="performance-date">...<span>On 13 November 2026</span>
+_DATE = re.compile(r'performance-date.*?<span>\s*(?P<d>.*?)\s*</span>', re.S)
 _TAG = re.compile(r"<.*?>")
 
 
@@ -55,23 +70,32 @@ def fetch_html():
 
 
 def parse(html):
-    """Return list of dicts: {report_date, section, item, value_raw, value_num, unit}."""
+    """Return list of dicts: {report_date, section, item, value_raw, value_num, unit}.
+
+    Metrics live in Bootstrap tab panes (ids domestic/international/otp/plf/udan);
+    each pane has its own 'performance-date' and a set of metric cards.
+    """
+    pos = {}
+    for pid in _PANE_IDS:
+        m = re.search(r'id="' + pid + '"', html)
+        if m:
+            pos[pid] = m.start()
+    starts = sorted(pos.values())
+
     out = []
-    for seg in re.split(r'(?=<div class="card-header)', html):
-        m = re.search(r'<span class="eng-title">\s*(.*?)\s*</span>', seg)
-        if not m:
+    for pid, section in TAB_SECTIONS:
+        if pid not in pos:
             continue
-        title = _clean(m.group(1))
-        if title not in SECTIONS:
-            continue
-        dm = re.search(r'<span class="date-widget">\s*(.*?)\s*</span>', seg)
-        report_date = _clean(dm.group(1)) if dm else ""
-        report_date = re.sub(r"^On\s+", "", report_date)  # "On 23 July 2026" -> "23 July 2026"
-        body = seg.split("card-body", 1)[-1]
-        for lbl, val in _PAIR.findall(body):
-            label, raw = _clean(lbl), _clean(val)
+        start = pos[pid]
+        later = [p for p in starts if p > start]           # next pane in DOM order
+        seg = html[start:(min(later) if later else len(html))]
+        dm = _DATE.search(seg)
+        report_date = _clean(dm.group("d")) if dm else ""
+        report_date = re.sub(r"^(On|Till)\s+", "", report_date)  # "On 13 November 2026" -> "13 November 2026"
+        for m in _CARD.finditer(seg):
+            label, raw = _clean(m.group("label")), _clean(m.group("value"))
             num, unit = _to_num(raw)
-            out.append({"report_date": report_date, "section": title, "item": label,
+            out.append({"report_date": report_date, "section": section, "item": label,
                         "value_raw": raw, "value_num": num, "unit": unit})
     return out
 
