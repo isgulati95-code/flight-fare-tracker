@@ -403,6 +403,37 @@ def av_latest(rows, section, item):
     return cand[-1]
 
 
+# Warn on the dashboard if the newest aviation report_date is older than this many
+# days behind the run date. Normal source lag is ~1-3 days; a silent scraper failure
+# (e.g. the Oct 2026 site redesign) pushes this to weeks.
+AVIATION_STALE_DAYS = 6
+
+
+def aviation_staleness(av_rows, ref_date=None):
+    """(days_old, 'd Mon YYYY') for the newest aviation report_date, or (None, None)."""
+    ref_date = ref_date or dt.date.today()
+    dates = [r["dt"].date() for r in av_rows if r.get("dt")]
+    if not dates:
+        return None, None
+    latest = max(dates)
+    return (ref_date - latest).days, latest.strftime("%d %b %Y").lstrip("0")
+
+
+def aviation_banner(days_old, label):
+    """A visible warning when national-aviation data has gone stale (scraper failing
+    or the source stopped updating). Returns '' when the data is fresh."""
+    if days_old is None:
+        msg = ("No national-aviation data has been captured yet. "
+               "The civilaviation.gov.in dashboard scraper may need attention.")
+    elif days_old > AVIATION_STALE_DAYS:
+        msg = (f"National-aviation data is {days_old} days old (latest report: {label}). "
+               "The civilaviation.gov.in dashboard may have changed or the scraper may be "
+               "failing — fares are unaffected.")
+    else:
+        return ""
+    return f"<div class='stalebanner'>⚠ {escape(msg)}</div>"
+
+
 def loadfactor_matrix(rows, P):
     sec = "Passenger Load Factor"
     all_air = sorted({r["item"] for r in rows if r["section"] == sec})
@@ -696,6 +727,11 @@ def render():
     P = build_periods(month) if month else None
     av_rows = aviation_rows()
     days_tm = sum(1 for d in capture_dates if month_of(d) == month)
+    try:
+        ref_date = dt.datetime.strptime(latest, "%Y-%m-%d").date() if latest else dt.date.today()
+    except ValueError:
+        ref_date = dt.date.today()
+    banner_html = aviation_banner(*aviation_staleness(av_rows, ref_date))
     if P:
         groups_html = (
             yield_matrix(flights, P)
@@ -767,6 +803,11 @@ def render():
   .chip.alt {{ color:var(--ink2); background:var(--card2); }}
   .stopbadge {{ font-size:10px; font-weight:600; color:var(--ink2); background:var(--card2); border:1px solid var(--border); padding:1px 6px; border-radius:6px; margin-left:8px; }}
   .empty {{ color:var(--muted); padding:40px 0; text-align:center; }}
+  .stalebanner {{ background:#fff6e6; color:#8a5a00; border:1px solid #f0c879; border-radius:12px;
+    padding:12px 16px; margin:18px 0 0; font-size:13.5px; font-weight:600; line-height:1.5; }}
+  @media (prefers-color-scheme: dark) {{ :root:where(:not([data-theme="light"])) .stalebanner {{
+    background:#2a2210; color:#ffcf6b; border-color:#5c4a1e; }} }}
+  :root[data-theme="dark"] .stalebanner {{ background:#2a2210; color:#ffcf6b; border-color:#5c4a1e; }}
   .aviation {{ border-color:var(--accent); }}
   .note {{ color:var(--muted); font-size:11.5px; margin:0 0 8px; text-transform:uppercase; letter-spacing:.03em; }}
   .barcell {{ width:36%; }} .bar {{ display:block; height:7px; background:var(--line); border-radius:99px; overflow:hidden; }}
@@ -783,6 +824,8 @@ def render():
     <p class="sub">8 routes · booking horizon +2 weeks. Fares from Google Flights; load factor &amp; departures
     from the Ministry of Civil Aviation. <b>Latest capture: {latest_disp}</b> · {days_tm} day(s) in {ml}.</p>
   </header>
+
+  {banner_html}
 
   <h2 style="font-size:18px;margin:26px 0 12px;letter-spacing:-.01em">Period comparisons</h2>
   {groups_html}
